@@ -1,0 +1,146 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  # The full matrix on Linux: every configuration has to be green, because
+  # warning and sanitizer behaviour is not configuration-independent (see the
+  # -Wsign-conversion entry in docs/development-log.md).
+  linux:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, release, asan, ubsan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++-13
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+        env:
+          CXX: g++-13
+      - name: Build
+        run: cmake --build build/${{ matrix.preset }}
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+        if: matrix.preset != 'release'
+      - name: Benchmarks compile and run
+        run: ./build/${{ matrix.preset }}/benchmarks/bench_toolchain 5
+        if: matrix.preset == 'release'
+
+  # The toolchain builds with MSVC as well as GCC and Clang; this job keeps it
+  # that way.
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset release
+      - name: Build
+        run: cmake --build build/release --config Release
+      - name: Test
+        run: ctest --test-dir build/release --output-on-failure
+
+  # A build with no network access at all, proving the "no dependencies" claim
+  # in ADR-010 rather than asserting it.
+  offline:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++-13
+      # `unshare -r` creates a new user namespace to get root inside it, which
+      # is what lets an unprivileged runner also unshare the network namespace
+      # (-n). Ubuntu 24.04 blocks that via AppArmor by default (see `man
+      # unshare`'s AppArmor notes) -- the runner has passwordless sudo, so
+      # relaxing it for this job is simpler than emulating the restriction.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Configure and build with networking disabled
+        run: |
+          cmake --preset debug
+          unshare -r -n cmake --build build/debug
+        env:
+          CXX: g++-13
+      - name: Test
+        run: ctest --preset debug
+
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned: clang-format changes its line breaking between major versions,
+      # so an unpinned tool turns a green tree red on an unrelated upgrade.
+      # The codebase is formatted with exactly this version.
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format-18
+      - name: Check formatting
+        run: |
+          find include src tests benchmarks \
+            \( -name '*.hpp' -o -name '*.cpp' \) -print0 \
+            | xargs -0 clang-format-18 --dry-run --Werror
+
+  tidy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to clang-tidy-18 for the same reason clang-format is pinned
+      # above: an unversioned `clang-tidy` tracks whatever noble's default
+      # alternative resolves to, which can change under an unrelated image
+      # upgrade. libc++-18-dev is not for linking -- clang-tidy only parses
+      # and analyses -- it exists to work around a real libstdc++/Clang
+      # mismatch (see --extra-arg below).
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang-tidy-18 libc++-18-dev libc++abi-18-dev g++-13
+      - name: Configure
+        run: cmake --preset debug
+        env:
+          CXX: g++-13
+      - name: Run clang-tidy
+        run: |
+          # `-name A -o -name B` with no parentheses is `(-name A) -o (-name
+          # B -print0)`: -print0 binds only to the second clause, so the two
+          # branches are printed with different terminators and every .hpp
+          # is silently dropped once piped through `xargs -0`. This is the
+          # same mistake the `format` job avoids just above -- parenthesise
+          # the -o expression so -print0 applies to the whole match.
+          #
+          # --extra-arg=-stdlib=libc++: at -std=c++23, Clang 18 reports
+          # __cpp_concepts as 201907L where GCC reports 202002L (a real,
+          # long-standing feature-test-macro mismatch between the two
+          # compilers, unrelated to this project). libstdc++'s <expected>
+          # gates its content on __cpp_concepts >= 202002L, so Clang sees an
+          # empty header and every std::expected use in this codebase fails
+          # to parse. Pointing clang-tidy at libc++ instead sidesteps the
+          # mismatch entirely, since libc++ has no such guard.
+          find include src \( -name '*.hpp' -o -name '*.cpp' \) -print0 \
+            | xargs -0 clang-tidy-18 -p build/debug --extra-arg=-stdlib=libc++
+
+  # The golden fixtures must match what this build produces. If they do not,
+  # either a format changed or something changed it by accident, and the
+  # difference between those is a decision, not a merge.
+  golden:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++-13
+      - name: Build
+        run: |
+          cmake --preset release
+          cmake --build build/release
+        env:
+          CXX: g++-13
+      - name: Fixtures are unchanged
+        run: ./build/release/tests/test_golden_binaries
+      - name: Output is identical on a second build
+        run: |
+          ./build/release/src/minitool build examples/hello.asm -o /tmp/a.mexe
+          ./build/release/src/minitool build examples/hello.asm -o /tmp/b.mexe
+          cmp /tmp/a.mexe /tmp/b.mexe

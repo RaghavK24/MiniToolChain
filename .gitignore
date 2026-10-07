@@ -1,0 +1,11 @@
+build/
+out/
+.cache/
+compile_commands.json
+
+# Build products anywhere except the checked-in golden fixtures, which are the
+# whole point of tests/fixtures/ (see tests/golden/test_golden_binaries.cpp).
+*.mobj
+*.mexe
+!tests/fixtures/*.mobj
+!tests/fixtures/*.mexe

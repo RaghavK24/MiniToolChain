@@ -1,0 +1,23 @@
+# Normalise text to LF in the repository; check it out with whatever the
+# platform uses. Without this, a Windows clone commits CRLF and the Linux CI
+# jobs see a diff in every file.
+* text=auto
+
+# The golden fixtures are byte-exact by definition: tests/golden compares them
+# to freshly generated output, so a single translated byte fails the build.
+# Git would infer "binary" from the NUL bytes they contain, but inference is
+# not a guarantee. Say it.
+*.mobj binary
+*.mexe binary
+
+# PowerShell is happiest with CRLF, and these are the entry point on Windows.
+*.ps1 text eol=crlf
+
+# Assembly is pinned to LF so a source file hashes the same on every platform.
+# The lexer treats CR as whitespace either way, so this is about reproducibility
+# rather than correctness.
+*.asm text eol=lf
+
+# Keep diffs on C++ sources readable with function context in hunk headers.
+*.cpp diff=cpp
+*.hpp diff=cpp
